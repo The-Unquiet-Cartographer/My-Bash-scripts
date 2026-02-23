@@ -37,6 +37,25 @@
 	)
 	readonly paletteSize=${#quakePalette[@]}
 
+#We will reuse this later
+	LogPalette() {
+		local _paletteAsArray=("$@")
+		local _paletteSize=${#_paletteAsArray[@]}
+		for ((i=0; i<$_paletteSize; i+=8)); do
+			remainder=$(( $(($_paletteSize-i)) % 8 ))
+			[ $remainder -eq 0 ] && remainder=8
+			string="(${_paletteAsArray[$i]})"
+			for ((j=1; j<$remainder; j++)); do
+				string+=" (${_paletteAsArray[$(($i+$j))]})"
+			done
+			echo $string
+		done
+	}
+	if [ $logging = true ]; then
+		echo "Quake palette:"
+		LogPalette "${quakePalette[@]}"
+	fi
+
 #BMP output sizes
 	readonly size_bytes_palette=$(( 256 * 4 ))
 	readonly size_bytes_header=$(( 14 + 40 + size_bytes_palette ))
@@ -55,21 +74,51 @@
 	Write_LE_32() {
 		printf "%08x" "$1" | sed 's/\(..\)/\1 /g' | awk '{print $4$3$2$1}' | xxd -r -p
 	}
-#Find the index of the closest Quake palette colour using RGB distance
+	ToHex() {
+		printf "%02x" "$1"
+	}
+
+# Detect and read BMP palette for indexed images
+# Palettes will be recorded in hexidecimal format (this is so the Konsole can read the colours)
+	sourceBMPPalette=()		#I would rather pass this as an argument but it was causing me gyp so I left it global.
+	ReadBMPPalette() {
+		sourceBMPPalette=()
+		local _bitsPerPixel=$1
+		local numColors=$((1 << _bitsPerPixel))
+		for ((i=0;i<$numColors;i++)); do
+			offset=$((14 + 40 + i*4))   # BMP header + DIB header + palette entry
+			b=$(od -An -t u1 -j $offset -N 1 "$arg_input" | tr -d ' ')
+			g=$(od -An -t u1 -j $((offset+1)) -N 1 "$arg_input" | tr -d ' ')
+			r=$(od -An -t u1 -j $((offset+2)) -N 1 "$arg_input" | tr -d ' ')
+		#Fallback to 0 if empty
+			r=$(ToHex ${r:-224})
+			g=$(ToHex ${g:-0})
+			b=$(ToHex ${b:-224})
+			sourceBMPPalette+=("#$r$g$b")
+		done
+	#Logging the palette for debugging
+		if [ $logging = true ]; then
+			echo "Palette:"
+			LogPalette "${sourceBMPPalette[@]}"
+		fi
+	}
+
+# Find the index of the closest Quake palette colour using RGB distance
+# Input must be in decimal format
 	NearestIndex() {
-		local input_r=$1
-		local input_g=$2
-		local input_b=$3
+		local _colour_r=$1
+		local _colour_g=$2
+		local _colour_b=$3
 		local best_index=0
 		local best_dist=999999999
-		for ((i=0; i<paletteSize; i++)); do
-			hex=${quakePalette[i]}
-			palette_r=$((16#${hex:1:2}))
-			palette_g=$((16#${hex:3:2}))
-			palette_b=$((16#${hex:5:2}))
-			distance_r=$((input_r - palette_r))
-			distance_g=$((input_g - palette_g))
-			distance_b=$((input_b - palette_b))
+		for ((i=0; i<$paletteSize; i++)); do
+			compareTo_hex=${quakePalette[i]}
+			palette_r=$((16#${compareTo_hex:1:2}))
+			palette_g=$((16#${compareTo_hex:3:2}))
+			palette_b=$((16#${compareTo_hex:5:2}))
+			distance_r=$((_colour_r - palette_r))
+			distance_g=$((_colour_g - palette_g))
+			distance_b=$((_colour_b - palette_b))
 			dist=$((distance_r*distance_r + distance_g*distance_g + distance_b*distance_b))
 			if [ $dist -lt $best_dist ]; then
 				best_dist=$dist
@@ -77,31 +126,6 @@
 			fi
 		done
 		echo "$best_index"
-	}
-# Detect and read BMP palette for indexed images
-	sourceBMPPalette=()		#I would rather pass this as an argument but it was causing me gyp so I left it global.
-	ReadBMPPalette() {
-		sourceBMPPalette=()
-		local _bitsPerPixel=$1
-		local numColors=$((1 << _bitsPerPixel))
-		for ((i=0;i<numColors;i++)); do
-			offset=$((14 + 40 + i*4))   # BMP header + DIB header + palette entry
-			b=$(od -An -t u1 -j $offset -N 1 "$arg_input" | tr -d ' ')
-			g=$(od -An -t u1 -j $((offset+1)) -N 1 "$arg_input" | tr -d ' ')
-			r=$(od -An -t u1 -j $((offset+2)) -N 1 "$arg_input" | tr -d ' ')
-		#Fallback to 0 if empty
-			r=${r:-0}
-			g=${g:-0}
-			b=${b:-0}
-			sourceBMPPalette+=("$r,$g,$b")
-		done
-	#Logging the palette for debugging
-		if [ $logging = true ]; then
-			echo "Palette contents:"
-			for color in "${sourceBMPPalette[@]}"; do
-				echo "$color"
-			done
-		fi
 	}
 
 
@@ -125,15 +149,13 @@
 		src_width_pixels=$(Read_LE_UInt32 18)
 		src_height_pixels=$(Read_LE_UInt32 22)
 		src_bitsPerPixel=$(Read_LE_UInt16 28)
-		[ "$logging" = true ] && echo "Bits-per-pixel is $src_bitsPerPixel"
+		[ "$logging" = true ] && echo "Bits-per-pixel: $src_bitsPerPixel"
 	# Read palette if needed
-		if (( src_bitsPerPixel == 4 || src_bitsPerPixel == 8 )); then
+		if ((src_bitsPerPixel < 16)); then
 			ReadBMPPalette $src_bitsPerPixel
 		fi
 		src_byteOffset_pixels=$(Read_LE_UInt32 10)
 		src_bytesPerRow=$(( (src_width_pixels*src_bitsPerPixel/8 + 3) & ~3 ))
-
-
 
 
 	#WRITE .BMP HEADER
@@ -193,10 +215,31 @@
 			local _new_yCoord=$1
 			echo $(( _new_yCoord * src_height_pixels / newHeight_pixels ))
 		}
+		ExtractPixelData_LT16Bits() {
+			local _bitsPerPixel=$1
+			local _pixelsPerByte=$((8/_bitsPerPixel))
+			src_x_byteIndex=$(( src_y_byteIndex0 + $src_xCoord / $_pixelsPerByte ))
+			byte=$(od -An -t u1 -j $src_x_byteIndex -N 1 "$arg_input" | tr -d ' ')
+			byte=${byte:-0}		# Fallback
+		# Calculate bit position (1-bit stores bits in reverse order per-byte)
+			if ((_bitsPerPixel == 1)); then
+				shift_amount=$(( 7 - (src_xCoord % 8) ))
+			else
+				shift_amount=$(( (src_xCoord % _pixelsPerByte) * bitsPerPixel ))
+			fi
+		# Extract correct number of bits using a bitmask
+			index=$(( (byte >> shift_amount) & ((1 << _bitsPerPixel) - 1) ))
+			index=$(( index < ${#sourceBMPPalette[@]} ? index : 0 ))		# Bounds check
+			colour_hex=${sourceBMPPalette[$index]}
+			colour_r=$((16#${colour_hex:1:2}))
+			colour_g=$((16#${colour_hex:3:2}))
+			colour_b=$((16#${colour_hex:5:2}))
+		}
 	#Nearest-neighbor scaling loop
-		for ((new_yCoord=0;new_yCoord<newHeight_pixels;new_yCoord++)); do
-			for ((new_xCoord=0;new_xCoord<newWidth_pixels;new_xCoord++)); do
-			#Get relative coordinate in the source image
+		for ((new_yCoord=0; new_yCoord<newHeight_pixels; new_yCoord++)); do
+			for ((new_xCoord=0; new_xCoord<newWidth_pixels; new_xCoord++)); do
+
+			#GET RELATIVE COORDINATE IN THE SOURCE IMAGE
 			#If using rotation, apply rotation formula to get a modified coordinate
 				src_xCoord=""
 				src_yCoord=""
@@ -225,41 +268,42 @@
 			#RETRIEVE BYTE INDEX
 				src_y_byteIndex0=$(( src_byteOffset_pixels + $src_yCoord * src_bytesPerRow ))
 				src_x_byteIndex=""
+			#The colours used for identifying the paletteIndex must be in decimal format
+				colour_r=255
+				colour_g=0
+				colour_b=255
 				case $src_bitsPerPixel in
-			#24-bit source; each pixel uses 3 bytes
+			#24-bit source; each pixel uses 3 bytes (RGB; each channel has 256 possible values for a total of 16777216 colours)
 				24)
 					src_x_byteIndex=$(( src_y_byteIndex0 + $src_xCoord * 3 ))
-					input_b=$(od -An -t u1 -j $src_x_byteIndex -N 1 "$arg_input" | tr -d ' ')
-					input_g=$(od -An -t u1 -j $((src_x_byteIndex+1)) -N 1 "$arg_input" | tr -d ' ')
-					input_r=$(od -An -t u1 -j $((src_x_byteIndex+2)) -N 1 "$arg_input" | tr -d ' ')
+					colour_b=$(od -An -t u1 -j $src_x_byteIndex -N 1 "$arg_input" | tr -d ' ')
+					colour_g=$(od -An -t u1 -j $((src_x_byteIndex+1)) -N 1 "$arg_input" | tr -d ' ')
+					colour_r=$(od -An -t u1 -j $((src_x_byteIndex+2)) -N 1 "$arg_input" | tr -d ' ')
 				;;
-			#8-bit source; each pixel uses 1 byte
+			#8-bit source; each pixel uses 1 byte (256 possible colours)
 				8)
-					src_x_byteIndex=$(( src_y_byteIndex0 + $src_xCoord ))
-					index=$(od -An -t u1 -j $src_x_byteIndex -N 1 "$arg_input" | tr -d ' ')
-					index=${index:-0}		#Fallback
-					IFS=',' read input_r input_g input_b <<< "${sourceBMPPalette[index]}"
+					ExtractPixelData_LT16Bits 8
 				;;
-			#4-bit source; each pixel uses half a byte (so we get the byte and choose which half to read)
+			#4-bit source; each pixel uses half a byte (16 possible colours)
 				4)
-					src_x_byteIndex=$(( src_y_byteIndex0 + $src_xCoord / 2 ))
-					byte=$(od -An -t u1 -j $src_x_byteIndex -N 1 "$arg_input" | tr -d ' ')
-					byte=${byte:-0}		#Fallback
-					if (( src_xCoord % 2 == 0 )); then
-						index=$(( byte >> 4 ))
-					else
-						index=$(( byte & 0x0F ))
-					fi
-					index=$(( index < ${#sourceBMPPalette[@]} ? index : 0 ))		# bounds check
-					IFS=',' read input_r input_g input_b <<< "${sourceBMPPalette[index]}"
+					ExtractPixelData_LT16Bits 4
+				;;
+			#2-bit source; each pixel uses 2-bits (4 possible colours)
+				2)
+					ExtractPixelData_LT16Bits 2
+				;;
+			#1-bit source; each pixel uses 1-bit (only 2 colours)
+				1)
+					ExtractPixelData_LT16Bits 1
+				;;
+				*)
+					echo "Bit depth not supported"
 				;;
 				esac
 				[ "$logging" = true ] && echo "Pixel @ ($new_xCoord, $new_yCoord); Reading source pixel @ ($src_xCoord, $src_yCoord), byte index $src_x_byteIndex."
-			#Fallback in case anything is empty
-				input_r=${input_r:-0}
-				input_g=${input_g:-0}
-				input_b=${input_b:-0}
-				paletteIndex=$(NearestIndex $input_r $input_g $input_b)
+
+			#CALCULATE PALETTE INDEX
+				paletteIndex=$(NearestIndex $colour_r $colour_g $colour_b)
 				printf "%02x" "$paletteIndex" | xxd -r -p >> "$arg_output"
 			done
 
@@ -278,3 +322,4 @@
 		echo "Converted $arg_input -> $arg_output"
 
 	done
+	echo "Done"
