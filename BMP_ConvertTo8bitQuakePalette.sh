@@ -4,7 +4,9 @@
 	readonly newWidth_pixels=64				#Should handle any size
 	readonly newHeight_pixels=64			#Should handle any size
 	readonly convertedFilePrefix=""			#Will be prepended to the output filename
-	readonly convertedFileSuffix=""			#Will be appended to the output filename
+	readonly convertedFileSuffix="_new"		#Will be appended to the output filename
+	#!Add a prefix or a suffix if you don't want to overwrite the old file!
+
 	readonly rotation=0						#[0/90/180/270] Rotate the image by 90 degree increments.
 	readonly mirror_x=false					#[true/false] Flip the image horizontally?
 	readonly mirror_y=false					#[true/false] Flip the image vertically?
@@ -34,6 +36,14 @@
 		"#a77b3b" "#b79b37" "#c7c337" "#e7e357" "#7fbfff" "#abe7ff" "#d7ffff" "#670000"	"#8b0000" "#b30000" "#d70000" "#ff0000" "#fff393" "#fff7c7" "#ffffff" "#9f5b53"
 	)
 	readonly paletteSize=${#quakePalette[@]}
+
+#BMP output sizes
+	readonly size_bytes_palette=$(( 256 * 4 ))
+	readonly size_bytes_header=$(( 14 + 40 + size_bytes_palette ))
+	readonly size_bytes_newRow=$(( ($newWidth_pixels + 3) & ~3 ))
+	readonly size_bytes_image=$(( size_bytes_newRow * newHeight_pixels ))
+	readonly size_bytes_file=$(( size_bytes_header + size_bytes_image ))
+
 
 #Read an integer at a given offset (little-endian format, 2-byte & 4-byte variants)
 	Read_LE_UInt16() {
@@ -69,8 +79,9 @@
 		echo "$best_index"
 	}
 # Detect and read BMP palette for indexed images
-	sourceBMPPalette=()		#I would rather pass this as an argument but it was causing me gyp
+	sourceBMPPalette=()		#I would rather pass this as an argument but it was causing me gyp so I left it global.
 	ReadBMPPalette() {
+		sourceBMPPalette=()
 		local _bitsPerPixel=$1
 		local numColors=$((1 << _bitsPerPixel))
 		for ((i=0;i<numColors;i++)); do
@@ -102,27 +113,27 @@
 # Loop over all BMPs in current folder
 	for arg_input in *.bmp; do
 		[[ -f "$arg_input" ]] || continue
-		arg_output="${convertedFilePrefix}${arg_input%.bmp}${convertedFileSuffix}.bmp"
+	#Create a temporary file in the case that we're overwriting the old one
+		if [ "$convertedFilePrefix" = "" ] && [ "$convertedFileSuffix" = "" ]; then
+			arg_output="${arg_input%.bmp}_temp.bmp"
+		else
+			arg_output="${convertedFilePrefix}${arg_input%.bmp}${convertedFileSuffix}.bmp"
+		fi
 		echo "Converting $arg_input..."
 
    # Read BMP header info
-		readonly src_width_pixels=$(Read_LE_UInt32 18)
-		readonly src_height_pixels=$(Read_LE_UInt32 22)
-		readonly src_bitsPerPixel=$(Read_LE_UInt16 28)
+		src_width_pixels=$(Read_LE_UInt32 18)
+		src_height_pixels=$(Read_LE_UInt32 22)
+		src_bitsPerPixel=$(Read_LE_UInt16 28)
 		[ "$logging" = true ] && echo "Bits-per-pixel is $src_bitsPerPixel"
 	# Read palette if needed
 		if (( src_bitsPerPixel == 4 || src_bitsPerPixel == 8 )); then
 			ReadBMPPalette $src_bitsPerPixel
 		fi
-		readonly src_byteOffset_pixels=$(Read_LE_UInt32 10)
-		readonly src_bytesPerRow=$(( (src_width_pixels*src_bitsPerPixel/8 + 3) & ~3 ))
+		src_byteOffset_pixels=$(Read_LE_UInt32 10)
+		src_bytesPerRow=$(( (src_width_pixels*src_bitsPerPixel/8 + 3) & ~3 ))
 
-	#BMP output sizes
-		readonly size_bytes_palette=$(( 256 * 4 ))
-		readonly size_bytes_header=$(( 14 + 40 + size_bytes_palette ))
-		readonly size_bytes_newRow=$(( ($newWidth_pixels + 3) & ~3 ))
-		readonly size_bytes_image=$(( size_bytes_newRow * newHeight_pixels ))
-		readonly size_bytes_file=$(( size_bytes_header + size_bytes_image ))
+
 
 
 	#WRITE .BMP HEADER
@@ -258,6 +269,11 @@
 				printf "\x00" >> "$arg_output"
 			done
 		done
+
+	#Overwrite the old file if the name stays the same
+		if [ "$convertedFilePrefix" = "" ] && [ "$convertedFileSuffix" = "" ]; then
+			mv "$arg_output" "$arg_input"
+		fi
 
 		echo "Converted $arg_input -> $arg_output"
 
