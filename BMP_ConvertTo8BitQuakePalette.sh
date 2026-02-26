@@ -84,7 +84,10 @@
 	ReadBMPPalette() {
 		sourceBMPPalette=()
 		local _bitsPerPixel=$1
-		local numColors=$((1 << _bitsPerPixel))
+		local numColors=$(od -An -t u4 -j 46 -N 4 "$arg_input" | tr -d ' ')
+		if (( numColors == 0 )); then
+			numColors=$((1 << _bitsPerPixel))
+		fi
 		for ((i=0;i<$numColors;i++)); do
 			offset=$((14 + 40 + i*4))   # BMP header + DIB header + palette entry
 			b=$(od -An -t u1 -j $offset -N 1 "$arg_input" | tr -d ' ')
@@ -317,9 +320,10 @@
 	#Overwrite the old file if the name stays the same
 		if [ "$convertedFilePrefix" = "" ] && [ "$convertedFileSuffix" = "" ]; then
 			mv "$arg_output" "$arg_input"
+			echo "Converted $arg_input"
+		else
+			echo "Converted $arg_input -> $arg_output"
 		fi
-
-		echo "Converted $arg_input -> $arg_output"
 
 	done
 	echo "Done"
